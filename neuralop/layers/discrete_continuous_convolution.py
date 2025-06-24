@@ -5,7 +5,7 @@ import numpy
 import torch
 import torch.nn as nn
 
-from typing import Union, List, Optional, Tuple, Literal
+from typing import Union, Optional, Literal
 
 # import the base class from torch-harmonics
 try:
@@ -211,7 +211,7 @@ class DiscreteContinuousConv(nn.Module, metaclass=abc.ABCMeta):
         self,
         in_channels: int,
         out_channels: int,
-        kernel_shape: Union[int, List[int]],
+        kernel_shape: Union[int, list[int]],
         basis_type: Literal['piecewise_linear', 'morlet', 'zernike']='piecewise_linear',
         groups: Optional[int] = 1,
         bias: Optional[bool] = True,
@@ -321,10 +321,10 @@ class DiscreteContinuousConv2d(DiscreteContinuousConv):
         out_channels: int,
         grid_in: torch.Tensor,
         grid_out: torch.Tensor,
-        kernel_shape: Union[int, List[int]],
+        kernel_shape: Union[int, list[int]],
         basis_type: str="piecewise_linear",
-        n_in: Optional[Tuple[int]] = None,
-        n_out: Optional[Tuple[int]] = None,
+        n_in: Optional[tuple[int]] = None,
+        n_out: Optional[tuple[int]] = None,
         quadrature_weights: Optional[torch.Tensor] = None,
         periodic: Optional[bool] = False,
         groups: Optional[int] = 1,
@@ -504,10 +504,10 @@ class DiscreteContinuousConvTranspose2d(DiscreteContinuousConv):
         out_channels: int,
         grid_in: torch.Tensor,
         grid_out: torch.Tensor,
-        kernel_shape: Union[int, List[int]],
+        kernel_shape: Union[int, list[int]],
         basis_type: str="piecewise_linear",
-        n_in: Optional[Tuple[int]] = None,
-        n_out: Optional[Tuple[int]] = None,
+        n_in: Optional[tuple[int]] = None,
+        n_out: Optional[tuple[int]] = None,
         quadrature_weights: Optional[torch.Tensor] = None,
         periodic: Optional[bool] = False,
         groups: Optional[int] = 1,
@@ -682,11 +682,11 @@ class EquidistantDiscreteContinuousConv2d(DiscreteContinuousConv):
         self,
         in_channels: int,
         out_channels: int,
-        in_shape: Tuple[int],
-        out_shape: Tuple[int],
-        kernel_shape: Union[int, List[int]],
+        in_shape: tuple[int],
+        out_shape: tuple[int],
+        kernel_shape: Union[int, list[int]],
         basis_type: str="piecewise_linear",
-        domain_length: Optional[Tuple[float]] = None,
+        domain_length: Optional[tuple[float]] = None,
         periodic: Optional[bool] = False,
         groups: Optional[int] = 1,
         bias: Optional[bool] = True,
@@ -840,11 +840,11 @@ class EquidistantDiscreteContinuousConvTranspose2d(DiscreteContinuousConv):
         self,
         in_channels: int,
         out_channels: int,
-        in_shape: Tuple[int],
-        out_shape: Tuple[int],
-        kernel_shape: Union[int, List[int]],
+        in_shape: tuple[int],
+        out_shape: tuple[int],
+        kernel_shape: Union[int, list[int]],
         basis_type: str="piecewise_linear",
-        domain_length: Optional[Tuple[float]] = None,
+        domain_length: Optional[tuple[float]] = None,
         periodic: Optional[bool] = False,
         groups: Optional[int] = 1,
         bias: Optional[bool] = True,
@@ -946,3 +946,10 @@ class EquidistantDiscreteContinuousConvTranspose2d(DiscreteContinuousConv):
         out = nn.functional.conv_transpose2d(self.q_weight * x, kernel, self.bias, stride=[self.scale_h, self.scale_w], dilation=[1,1], padding=[h_pad, w_pad], output_padding=[h_pad_out, w_pad_out], groups=self.groups)
 
         return out
+
+### for testing purposes ###
+if __name__ == "__main__":
+    x = torch.randn(1, 16, 16)
+    layer = EquidistantDiscreteContinuousConv2d(1, 1, in_shape=(16, 16), out_shape=(16, 16), kernel_shape =[3, 3], radius_cutoff = 0.01)
+    y = layer(x)
+    print(y.shape)
