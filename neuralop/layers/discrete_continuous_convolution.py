@@ -11,7 +11,8 @@ from typing import Union, Optional, Literal
 try:
     from torch_harmonics.quadrature import _precompute_grid
     from torch_harmonics.filter_basis import (PiecewiseLinearFilterBasis, 
-                                            MorletFilterBasis, 
+                                            MorletFilterBasis,
+                                            MorletFilterBasis3d, 
                                             ZernikeFilterBasis)
 except ModuleNotFoundError:
     print("Error: trying to import DISCO convolutions without optional dependency torch-harmonics. ",
@@ -20,6 +21,7 @@ except ModuleNotFoundError:
 basis_type_classes = {
     'piecewise_linear': PiecewiseLinearFilterBasis,
     'morlet': MorletFilterBasis,
+    'morlet3d': MorletFilterBasis3d,
     'zernike': ZernikeFilterBasis
 }
 
@@ -212,7 +214,7 @@ class DiscreteContinuousConv(nn.Module, metaclass=abc.ABCMeta):
         in_channels: int,
         out_channels: int,
         kernel_shape: Union[int, list[int]],
-        basis_type: Literal['piecewise_linear', 'morlet', 'zernike']='piecewise_linear',
+        basis_type: Literal['piecewise_linear', 'morlet', 'zernike', 'morlet3d']='piecewise_linear',
         groups: Optional[int] = 1,
         bias: Optional[bool] = True,
     ):
@@ -947,9 +949,166 @@ class EquidistantDiscreteContinuousConvTranspose2d(DiscreteContinuousConv):
 
         return out
 
+class EquidistantDiscreteContinuousConv3d(DiscreteContinuousConv):
+    """
+    Discrete-continuous convolutions (DISCO) on equidistant 3d grids.
+    This implementation maps to 3d convolution kernels which makes it more efficient 
+    than an unstructured implementation. Due to the mapping to an equidistant grid, 
+    the domain lengths need to be specified in order to compute the effective resolution 
+    and the corresponding cutoff radius. Forward call expects an input of shape 
+    (batch_size, in_channels, in_shape[0], in_shape[1], in_shape[2]).
+
+    Parameters
+    ----------
+    in_channels: int
+        input channels to DISCO convolution
+    out_channels: int
+        output channels of DISCO convolution
+    in_shape: Tuple[int]
+        shape of the (regular) input grid.
+    out_shape: Tuple[int]
+        shape of the (regular) output grid. Note that the side lengths
+        of out_shape must be less than or equal to the side lengths
+        of in_shape, and must be integer divisions of the corresponding
+        in_shape side lengths.
+    kernel_shape : ``Union[int, List[int]]``
+        Dimensions of the convolution kernel, either one int or a three-int tuple.
+        * If one int k, the kernel will be a cube of shape (k,k,k), meaning the convolution 
+        will be 'isotropic': all directions are equally scaled in feature space.
+
+        * If three ints (k1,k2,k3), the kernel will have shape (k1,k2,k3), meaning the convolution
+        will be 'anisotropic': directions can be compressed or stretched in feature space.
+    basis_type: str literal, must be 'morlet3d'
+        choice of basis functions to use for convolution filter tensor.
+    domain_length: torch.Tensor, optional
+        extent/length of the physical domain. Assumes cube domain [-1, 1]^3 by default
+    periodic: bool, optional
+        whether the domain is periodic, by default False
+    groups: int, optional
+        number of groups in the convolution, by default 1
+    bias: bool, optional
+        whether to use a bias, by default True
+    radius_cutoff: float, optional
+        cutoff radius for the kernel. For a point ``x`` on the input grid,
+        every point ``y`` on the output grid with ``||x - y|| <= radius_cutoff``
+        will be affected by the value at ``x``. 
+        By default, set to 2 / sqrt(# of output points)
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        in_shape: tuple[int, int, int],
+        out_shape: tuple[int, int, int],
+        kernel_shape: Union[int, list[int]],
+        basis_type: str="morlet3d",
+        domain_length: Optional[tuple[float, float, float]] = None,
+        periodic: Optional[bool] = False,
+        groups: Optional[int] = 1,
+        bias: Optional[bool] = True,
+        radius_cutoff: Optional[float] = None,
+        **kwargs
+    ):
+        super().__init__(in_channels=in_channels,
+                         out_channels=out_channels,
+                         kernel_shape=kernel_shape,
+                         basis_type=basis_type,
+                         groups=groups, bias=bias)
+
+        # to ensure compatibility with the unstructured code, only constant zero and periodic padding are supported currently
+        self.padding_mode = "circular" if periodic else "zeros"
+
+        # if domain length is not specified we use
+        self.domain_length = [2, 2, 2] if domain_length is None else domain_length
+
+        # compute the cutoff radius based on the assumption that the grid is [-1, 1]^3
+        if radius_cutoff is None:
+            radius_cutoff = max([self.domain_length[i] / float(out_shape[i]) for i in (0,1,2)])
+
+        if radius_cutoff <= 0.0:
+            raise ValueError("Error, radius_cutoff has to be positive.")
+
+        # compute how big the discrete kernel needs to be for the 3d convolution kernel to work
+        self.psi_local_d = math.floor(2*radius_cutoff * in_shape[0] / self.domain_length[0]) + 1
+        self.psi_local_h = math.floor(2*radius_cutoff * in_shape[1] / self.domain_length[1]) + 1
+        self.psi_local_w = math.floor(2*radius_cutoff * in_shape[2] / self.domain_length[2]) + 1
+
+        # compute the scale_factor
+        assert (in_shape[0] >= out_shape[0]) and (in_shape[0] % out_shape[0] == 0)
+        self.scale_d = in_shape[0] // out_shape[0]
+        assert (in_shape[1] >= out_shape[1]) and (in_shape[1] % out_shape[1] == 0)
+        self.scale_h = in_shape[1] // out_shape[1]
+        assert (in_shape[2] >= out_shape[2]) and (in_shape[2] % out_shape[2] == 0)
+        self.scale_w = in_shape[2] // out_shape[2]
+
+        # Create a 3D grid for the support of the hat functions evaluated locally
+        z = torch.linspace(-radius_cutoff, radius_cutoff, self.psi_local_d)
+        y = torch.linspace(-radius_cutoff, radius_cutoff, self.psi_local_h)
+        x = torch.linspace(-radius_cutoff, radius_cutoff, self.psi_local_w)
+        z, y, x = torch.meshgrid(z, y, x, indexing='ij')
+        grid = torch.stack([x, y, z])  # Shape: [3, D, H, W]
+
+        # compute quadrature weights on the incoming grid
+        self.q_weight = self.domain_length[0] * self.domain_length[1] * self.domain_length[2] / in_shape[0] / in_shape[1] / in_shape[2]
+        quadrature_weights = self.q_weight * torch.ones(self.psi_local_d * self.psi_local_h * self.psi_local_w)
+
+        # Initialize the basis with the kernel shape
+        basis = basis_type_classes[basis_type](self.kernel_shape)
+        
+        # Compute support values using the 3D API
+        idx, vals = basis.compute_support_vals(grid, r_cutoff=radius_cutoff)
+
+        # Extract the local psi as a dense representation
+        local_filter_matrix = torch.zeros(self.kernel_size, self.psi_local_d * self.psi_local_h * self.psi_local_w)
+        
+        # Convert sparse representation to dense
+        # idx has shape [nnz, 4] where each row is (basis_idx, z_idx, y_idx, x_idx)
+        for i in range(len(vals)):
+            basis_idx = idx[i, 0]
+            flat_idx = (idx[i, 1] * self.psi_local_h * self.psi_local_w + 
+                        idx[i, 2] * self.psi_local_w + 
+                        idx[i, 3])
+            local_filter_matrix[basis_idx, flat_idx] = vals[i]
+
+        # Reshape to 4D tensor
+        local_filter_matrix = local_filter_matrix.reshape(self.kernel_size, self.psi_local_d, self.psi_local_h, self.psi_local_w)
+
+        self.register_buffer("local_filter_matrix", local_filter_matrix, persistent=False)
+
+    def get_local_filter_matrix(self):
+        """
+        Returns the precomputed local convolution filter matrix Psi.
+        Psi parameterizes the kernel function as basis functions 
+        evaluated on the 3D grid.
+        """
+        # Permute to match the expected 3D convolution kernel format
+        return self.local_filter_matrix.permute(0, 3, 2, 1).flip(dims=(-1, -2, -3))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward call. Expects an input of shape batch_size x in_channels x in_shape[0] x in_shape[1] x in_shape[2].
+        """
+        kernel = torch.einsum("kxyz,ogk->ogxyz", self.get_local_filter_matrix(), self.weight)
+        
+        # padding is rounded down to give the right result when even kernels are applied
+        d_pad = (self.psi_local_d + 1) // 2 - 1
+        h_pad = (self.psi_local_h + 1) // 2 - 1
+        w_pad = (self.psi_local_w + 1) // 2 - 1
+        
+        out = nn.functional.conv3d(self.q_weight * x, kernel, self.bias,
+                                  stride=[self.scale_d, self.scale_h, self.scale_w],
+                                  dilation=1,
+                                  padding=[d_pad, h_pad, w_pad],
+                                  groups=self.groups)
+
+        return out
+
 ### for testing purposes ###
 if __name__ == "__main__":
-    x = torch.randn(1, 16, 16)
-    layer = EquidistantDiscreteContinuousConv2d(1, 1, in_shape=(16, 16), out_shape=(16, 16), kernel_shape =[3, 3], radius_cutoff = 0.01)
+    x = torch.randn(1, 16, 16, 16)
+    layer = EquidistantDiscreteContinuousConv3d(1, 1, in_shape=(16, 16, 16), out_shape=(16, 16, 16), kernel_shape=[3, 3, 3], radius_cutoff=0.01)
+    y = layer(x)
+    print(y.shape)
     y = layer(x)
     print(y.shape)
