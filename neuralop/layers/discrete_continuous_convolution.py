@@ -238,7 +238,7 @@ class DiscreteContinuousConv(nn.Module, metaclass=abc.ABCMeta):
         else:
             self.kernel_shape = kernel_shape
 
-        if basis_type == "morlet":
+        if basis_type in ["morlet", "morlet3d"]:
             self.kernel_size = math.prod(self.kernel_shape)
         else:
             self.kernel_size = (self.kernel_shape[0] - 1) * self.kernel_shape[1] + 1
@@ -1171,6 +1171,8 @@ class EquidistantDiscreteContinuousConv3d(DiscreteContinuousConv):
         self.psi_local_w = (
             math.floor(2 * radius_cutoff * in_shape[2] / self.domain_length[2]) + 1
         )
+        
+        print("psi_local_d, psi_local_h, psi_local_w:", self.psi_local_d, self.psi_local_h, self.psi_local_w)
 
         # compute the scale_factor
         assert (in_shape[0] >= out_shape[0]) and (in_shape[0] % out_shape[0] == 0)
@@ -1186,6 +1188,8 @@ class EquidistantDiscreteContinuousConv3d(DiscreteContinuousConv):
         x = torch.linspace(-radius_cutoff, radius_cutoff, self.psi_local_w)
         z, y, x = torch.meshgrid(z, y, x, indexing="ij")
         grid = torch.stack([x, y, z])  # Shape: [3, D, H, W]
+        
+        print("grid shape:", grid.shape)
 
         # compute quadrature weights on the incoming grid
         self.q_weight = (
@@ -1205,11 +1209,15 @@ class EquidistantDiscreteContinuousConv3d(DiscreteContinuousConv):
 
         # Compute support values using the 3D API
         idx, vals = basis.compute_support_vals(grid, r_cutoff=radius_cutoff)
+        
+        print(idx.shape, vals.shape) # 216x4 216
 
         # Extract the local psi as a dense representation
         local_filter_matrix = torch.zeros(
             self.kernel_size, self.psi_local_d * self.psi_local_h * self.psi_local_w
         )
+        
+        print("local_filter_matrix shape:", local_filter_matrix.shape)
 
         # Convert sparse representation to dense
         # idx has shape [nnz, 4] where each row is (basis_idx, z_idx, y_idx, x_idx)
@@ -1239,14 +1247,18 @@ class EquidistantDiscreteContinuousConv3d(DiscreteContinuousConv):
         """
         # Permute to match the expected 3D convolution kernel format
         return self.local_filter_matrix.permute(0, 3, 2, 1).flip(dims=(-1, -2, -3))
+    
+    def compile_kernel(self) -> torch.Tensor:
+        """Combines the local filter matrix (basis patterns) with the weights to create the final kernel."""
+        return torch.einsum(
+            "kxyz,ogk->ogxyz", self.get_local_filter_matrix(), self.weight
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward call. Expects an input of shape batch_size x in_channels x in_shape[0] x in_shape[1] x in_shape[2].
         """
-        kernel = torch.einsum(
-            "kxyz,ogk->ogxyz", self.get_local_filter_matrix(), self.weight
-        )
+        kernel = self.compile_kernel()
 
         # padding is rounded down to give the right result when even kernels are applied
         d_pad = (self.psi_local_d + 1) // 2 - 1
