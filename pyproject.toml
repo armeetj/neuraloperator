@@ -50,7 +50,7 @@ doc = [
     "matplotlib",
     "myst-nb",
     "numpydoc",
-    "numpy>=1.25",
+    "numpy",
     "sphinx",
     "sphinx-gallery",
     "sphinx-design",
@@ -70,7 +70,7 @@ all = [
     "sphinx-design",
     "tensorly_sphinx_theme",
     "torchtnt",
-    "numpy>=1.25",
+    "numpy",
     "scipy",
     "torch_harmonics==0.7.4"
 ]
