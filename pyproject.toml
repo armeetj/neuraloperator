@@ -12,7 +12,7 @@ dependencies = [
     "tensorly",
     "tensorly-torch",
     "matplotlib",
-    "numpy>=1.25",
+    "numpy",
     "opt-einsum",
     "h5py",
     "zencfg>=0.3.0",
