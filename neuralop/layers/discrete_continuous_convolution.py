@@ -4,6 +4,7 @@ import numpy
 
 import torch
 import torch.nn as nn
+import os
 
 from typing import Union, Optional, Literal
 
@@ -1149,90 +1150,73 @@ class EquidistantDiscreteContinuousConv3d(DiscreteContinuousConv):
         # to ensure compatibility with the unstructured code, only constant zero and periodic padding are supported currently
         self.padding_mode = "circular" if periodic else "zeros"
 
-        # if domain length is not specified we use
-        self.domain_length = [2, 2, 2] if domain_length is None else domain_length
-
-        # compute the cutoff radius based on the assumption that the grid is [-1, 1]^3
         if radius_cutoff is None:
-            radius_cutoff = max(
-                [self.domain_length[i] / float(out_shape[i]) for i in (0, 1, 2)]
-            )
+            radius_cutoff = 0.05
 
         if radius_cutoff <= 0.0:
             raise ValueError("Error, radius_cutoff has to be positive.")
 
         # compute how big the discrete kernel needs to be for the 3d convolution kernel to work
-        self.psi_local_d = (
-            math.floor(2 * radius_cutoff * in_shape[0] / self.domain_length[0]) + 1
-        )
-        self.psi_local_h = (
-            math.floor(2 * radius_cutoff * in_shape[1] / self.domain_length[1]) + 1
-        )
-        self.psi_local_w = (
-            math.floor(2 * radius_cutoff * in_shape[2] / self.domain_length[2]) + 1
-        )
-        
-        print("psi_local_d, psi_local_h, psi_local_w:", self.psi_local_d, self.psi_local_h, self.psi_local_w)
+        self.psi_local_d = math.floor(2 * radius_cutoff * in_shape[0]) + 1
+        self.psi_local_h = math.floor(2 * radius_cutoff * in_shape[1]) + 1
+        self.psi_local_w = math.floor(2 * radius_cutoff * in_shape[2]) + 1
+
+        # choose isotropic kernel
+        self.psi_local = max(self.psi_local_d, self.psi_local_h, self.psi_local_w)
+
+        if os.environ.get("DEBUG") == "1":
+            print("psi_local_d, psi_local_h, psi_local_w:", self.psi_local_d, self.psi_local_h, self.psi_local_w)
+            print("psi_local:", self.psi_local)
 
         # compute the scale_factor
-        assert (in_shape[0] >= out_shape[0]) and (in_shape[0] % out_shape[0] == 0)
-        self.scale_d = in_shape[0] // out_shape[0]
-        assert (in_shape[1] >= out_shape[1]) and (in_shape[1] % out_shape[1] == 0)
-        self.scale_h = in_shape[1] // out_shape[1]
-        assert (in_shape[2] >= out_shape[2]) and (in_shape[2] % out_shape[2] == 0)
-        self.scale_w = in_shape[2] // out_shape[2]
+        for dim_in, dim_out in zip(in_shape, out_shape):
+            assert dim_in == dim_out, "Not Implemented: in_shape and out_shape must be the same, different dimensions are not supported yet"
 
-        # Create a 3D grid for the support of the hat functions evaluated locally
-        z = torch.linspace(-radius_cutoff, radius_cutoff, self.psi_local_d)
-        y = torch.linspace(-radius_cutoff, radius_cutoff, self.psi_local_h)
-        x = torch.linspace(-radius_cutoff, radius_cutoff, self.psi_local_w)
-        z, y, x = torch.meshgrid(z, y, x, indexing="ij")
-        grid = torch.stack([x, y, z])  # Shape: [3, D, H, W]
-        
-        print("grid shape:", grid.shape)
+        x = torch.linspace(-1, 1, self.psi_local)
+        y = x
+        z = x
+
+        X, Y, Z = torch.meshgrid(x, y, z, indexing="ij")
+        grid = torch.stack([Z, Y, X])  # Shape: [3, D, H, W]
+
+        if os.environ.get("DEBUG") == "1":
+            print("grid shape:", grid.shape)
+            print("grid:", grid)
 
         # compute quadrature weights on the incoming grid
-        self.q_weight = (
-            self.domain_length[0]
-            * self.domain_length[1]
-            * self.domain_length[2]
-            / in_shape[0]
-            / in_shape[1]
-            / in_shape[2]
-        )
-        quadrature_weights = self.q_weight * torch.ones(
-            self.psi_local_d * self.psi_local_h * self.psi_local_w
-        )
+        self.q_weight = 1 / (self.psi_local**3)
 
         # Initialize the basis with the kernel shape
         basis = basis_type_classes[basis_type](self.kernel_shape)
 
         # Compute support values using the 3D API
-        idx, vals = basis.compute_support_vals(grid, r_cutoff=radius_cutoff)
+        idx, vals = basis.compute_support_vals(grid, r_cutoff=1.0, width=1.0)
         
-        print(idx.shape, vals.shape) # 216x4 216
+        if os.environ.get("DEBUG") == "1":
+            print("idx.shape, vals.shape:", idx.shape, vals.shape) 
 
         # Extract the local psi as a dense representation
         local_filter_matrix = torch.zeros(
-            self.kernel_size, self.psi_local_d * self.psi_local_h * self.psi_local_w
+            self.kernel_size, self.psi_local**3
         )
         
-        print("local_filter_matrix shape:", local_filter_matrix.shape)
+        if os.environ.get("DEBUG") == "1":
+            print("local_filter_matrix shape:", local_filter_matrix.shape)
 
         # Convert sparse representation to dense
         # idx has shape [nnz, 4] where each row is (basis_idx, z_idx, y_idx, x_idx)
         for i in range(len(vals)):
             basis_idx = idx[i, 0]
             flat_idx = (
-                idx[i, 1] * self.psi_local_h * self.psi_local_w
-                + idx[i, 2] * self.psi_local_w
+                idx[i, 1] * self.psi_local * self.psi_local
+                + idx[i, 2] * self.psi_local
                 + idx[i, 3]
             )
             local_filter_matrix[basis_idx, flat_idx] = vals[i]
 
         # Reshape to 4D tensor
         local_filter_matrix = local_filter_matrix.reshape(
-            self.kernel_size, self.psi_local_d, self.psi_local_h, self.psi_local_w
+            self.kernel_size, self.psi_local, self.psi_local, self.psi_local
         )
 
         self.register_buffer(
@@ -1248,11 +1232,27 @@ class EquidistantDiscreteContinuousConv3d(DiscreteContinuousConv):
         # Permute to match the expected 3D convolution kernel format
         return self.local_filter_matrix.permute(0, 3, 2, 1).flip(dims=(-1, -2, -3))
     
-    def compile_kernel(self) -> torch.Tensor:
+    def compile_kernel(self, use_einsum: bool = True) -> torch.Tensor:
         """Combines the local filter matrix (basis patterns) with the weights to create the final kernel."""
-        return torch.einsum(
-            "kxyz,ogk->ogxyz", self.get_local_filter_matrix(), self.weight
-        )
+        if use_einsum:
+            return torch.einsum(
+                "kxyz,ogk->ogxyz", self.get_local_filter_matrix(), self.weight
+            )
+        else:
+            raise NotImplementedError("Non-einsum implementation for faster execution is not implemented yet")
+            # Non-einsum implementation for faster execution
+            local_filter = self.get_local_filter_matrix()  # Shape: (k, x, y, z)
+            weight = self.weight  # Shape: (o, g, k)
+            
+            # Reshape local_filter to (k, xyz) for matrix multiplication
+            k, x, y, z = local_filter.shape
+            local_filter_flat = local_filter.view(k, x * y * z)  # Shape: (k, xyz)
+            
+            # Perform matrix multiplication: (o, g, k) @ (k, xyz) -> (o, g, xyz)
+            result = torch.matmul(weight, local_filter_flat)  # Shape: (o, g, xyz)
+            
+            # Reshape back to (o, g, x, y, z)
+            return result.view(weight.shape[0], weight.shape[1], x, y, z)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -1261,15 +1261,15 @@ class EquidistantDiscreteContinuousConv3d(DiscreteContinuousConv):
         kernel = self.compile_kernel()
 
         # padding is rounded down to give the right result when even kernels are applied
-        d_pad = (self.psi_local_d + 1) // 2 - 1
-        h_pad = (self.psi_local_h + 1) // 2 - 1
-        w_pad = (self.psi_local_w + 1) // 2 - 1
+        d_pad = (self.psi_local + 1) // 2 - 1
+        h_pad = (self.psi_local + 1) // 2 - 1
+        w_pad = (self.psi_local + 1) // 2 - 1
 
         out = nn.functional.conv3d(
             self.q_weight * x,
             kernel,
             self.bias,
-            stride=[self.scale_d, self.scale_h, self.scale_w],
+            stride=1,
             dilation=1,
             padding=[d_pad, h_pad, w_pad],
             groups=self.groups,
@@ -1280,16 +1280,66 @@ class EquidistantDiscreteContinuousConv3d(DiscreteContinuousConv):
 
 ### for testing purposes ###
 if __name__ == "__main__":
-    x = torch.randn(1, 16, 16, 16)
+    N = 9
+    x = torch.randn(1, 1, N, N, N)
+    K = 5
+    r = 1
     layer = EquidistantDiscreteContinuousConv3d(
         1,
         1,
-        in_shape=(16, 16, 16),
-        out_shape=(16, 16, 16),
-        kernel_shape=[3, 3, 3],
-        radius_cutoff=0.01,
+        in_shape=(N, N, N),
+        out_shape=(N, N, N),
+        kernel_shape=[K,K,K],
+        radius_cutoff=r, 
     )
     y = layer(x)
     print(y.shape)
     y = layer(x)
     print(y.shape)
+
+    # INSERT_YOUR_CODE
+    import matplotlib.pyplot as plt
+
+    # Get the kernel from the layer
+    kernel = layer.compile_kernel().detach().cpu().numpy()  # shape: (out_channels, in_channels/groups, D, H, W)
+
+    # Plot and save every slice of the kernel from all 3 points of view (depth, height, width)
+    out_ch = 0
+    in_ch = 0
+    D, H, W = kernel.shape[2], kernel.shape[3], kernel.shape[4]
+
+    # Plot all depth slices (axis 2)
+    fig, axs = plt.subplots(1, D, figsize=(3*D, 3))
+    if D == 1:
+        axs = [axs]
+    for d in range(D):
+        axs[d].imshow(kernel[out_ch, in_ch, d, :, :], cmap='viridis')
+        axs[d].set_title(f'depth={d}')
+        axs[d].axis('off')
+    # plt.tight_layout()
+    plt.savefig("kernel_slices_depth.png")
+    plt.close(fig)
+
+    # Plot all height slices (axis 3)
+    fig, axs = plt.subplots(1, H, figsize=(3*H, 3))
+    if H == 1:
+        axs = [axs]
+    for h in range(H):
+        axs[h].imshow(kernel[out_ch, in_ch, :, h, :], cmap='viridis')
+        axs[h].set_title(f'height={h}')
+        axs[h].axis('off')
+    # plt.tight_layout()
+    plt.savefig("kernel_slices_height.png")
+    plt.close(fig)
+
+    # Plot all width slices (axis 4)
+    fig, axs = plt.subplots(1, W, figsize=(3*W, 3))
+    if W == 1:
+        axs = [axs]
+    for w in range(W):
+        axs[w].imshow(kernel[out_ch, in_ch, :, :, w], cmap='viridis')
+        axs[w].set_title(f'width={w}')
+        axs[w].axis('off')
+    # plt.tight_layout()
+    plt.savefig("kernel_slices_width.png")
+    plt.close(fig)
