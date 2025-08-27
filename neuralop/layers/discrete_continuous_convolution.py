@@ -1181,7 +1181,6 @@ class EquidistantDiscreteContinuousConv3d(DiscreteContinuousConv):
 
         if os.environ.get("DEBUG") == "1":
             print("grid shape:", grid.shape)
-            print("grid:", grid)
 
         # compute quadrature weights on the incoming grid
         self.q_weight = 1 / (self.psi_local**3)
