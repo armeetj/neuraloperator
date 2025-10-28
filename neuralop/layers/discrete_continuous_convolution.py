@@ -13,6 +13,7 @@ try:
     from torch_harmonics.quadrature import _precompute_grid
     from torch_harmonics.filter_basis import (
         PiecewiseLinearFilterBasis,
+        PiecewiseLinearFilterBasis3d,
         MorletFilterBasis,
         MorletFilterBasis3d,
         ZernikeFilterBasis,
@@ -25,6 +26,7 @@ except ModuleNotFoundError:
 
 basis_type_classes = {
     "piecewise_linear": PiecewiseLinearFilterBasis,
+    "piecewise_linear3d": PiecewiseLinearFilterBasis3d,
     "morlet": MorletFilterBasis,
     "morlet3d": MorletFilterBasis3d,
     "zernike": ZernikeFilterBasis,
@@ -227,7 +229,7 @@ class DiscreteContinuousConv(nn.Module, metaclass=abc.ABCMeta):
         out_channels: int,
         kernel_shape: Union[int, list[int]],
         basis_type: Literal[
-            "piecewise_linear", "morlet", "zernike", "morlet3d"
+            "piecewise_linear", "piecewise_linear3d", "morlet", "zernike", "morlet3d"
         ] = "piecewise_linear",
         groups: Optional[int] = 1,
         bias: Optional[bool] = True,
@@ -1106,7 +1108,7 @@ class EquidistantDiscreteContinuousConv3d(DiscreteContinuousConv):
 
         * If three ints (k1,k2,k3), the kernel will have shape (k1,k2,k3), meaning the convolution
         will be 'anisotropic': directions can be compressed or stretched in feature space.
-    basis_type: str literal, must be 'morlet3d'
+    basis_type: str literal, must be 'piecewise_linear3d' or 'morlet3d'
         choice of basis functions to use for convolution filter tensor.
     domain_length: torch.Tensor, optional
         extent/length of the physical domain. Assumes cube domain [-1, 1]^3 by default
@@ -1130,7 +1132,7 @@ class EquidistantDiscreteContinuousConv3d(DiscreteContinuousConv):
         in_shape: tuple[int, int, int],
         out_shape: tuple[int, int, int],
         kernel_shape: Union[int, list[int]],
-        basis_type: str = "morlet3d",
+        basis_type: str = "piecewise_linear3d",
         domain_length: Optional[tuple[float, float, float]] = None,
         periodic: Optional[bool] = False,
         groups: Optional[int] = 1,
