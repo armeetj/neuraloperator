@@ -1138,6 +1138,7 @@ class EquidistantDiscreteContinuousConv3d(DiscreteContinuousConv):
         groups: Optional[int] = 1,
         bias: Optional[bool] = True,
         radius_cutoff: Optional[float] = None,
+        normalize: Optional[bool] = True,
         **kwargs,
     ):
         super().__init__(
@@ -1180,19 +1181,38 @@ class EquidistantDiscreteContinuousConv3d(DiscreteContinuousConv):
 
         X, Y, Z = torch.meshgrid(x, y, z, indexing="ij")
         grid = torch.stack([Z, Y, X])  # Shape: [3, D, H, W]
+        grid_out = torch.Tensor([[0.0], [0.0], [0.0]])
 
         if os.environ.get("DEBUG") == "1":
             print("grid shape:", grid.shape)
 
         # compute quadrature weights on the incoming grid
-        self.q_weight = 1 / (self.psi_local**3)
-
+        #self.q_weight = 1 / (self.psi_local**3)
+        self.q_weight = (
+            self.domain_length[0] * self.domain_length[1] * self.domain_length[2] / in_shape[0] / in_shape[1] / in_shape[2]
+        )
+        quadrature_weights = self.q_weight * torch.ones(
+            self.psi_local_d * self.psi_local_h * self.psi_local_w
+        )
         # Initialize the basis with the kernel shape
         basis = basis_type_classes[basis_type](self.kernel_shape)
 
         # Compute support values using the 3D API
         idx, vals = basis.compute_support_vals(grid, r_cutoff=1.0, width=1.0)
-        
+        #### TODO: do we need `idx = idx.permute(1, 0)`?
+
+        if normalize:
+            vals = _normalize_convolution_filter_matrix(
+                idx,
+                vals,
+                grid,
+                grid_out,
+                kernel_shape,
+                quadrature_weights,
+                transpose_normalization=False,
+            )
+
+
         if os.environ.get("DEBUG") == "1":
             print("idx.shape, vals.shape:", idx.shape, vals.shape) 
 
