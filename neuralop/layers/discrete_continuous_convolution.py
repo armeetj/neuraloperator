@@ -243,6 +243,8 @@ class DiscreteContinuousConv(nn.Module, metaclass=abc.ABCMeta):
 
         if basis_type in ["morlet", "morlet3d"]:
             self.kernel_size = math.prod(self.kernel_shape)
+        elif basis_type == 'piecewise_linear3d':
+            self.kernel_size = (self.kernel_shape[0] - 1) * self.kernel_shape[1] * self.kernel_shape[2] + 1
         else:
             self.kernel_size = (self.kernel_shape[0] - 1) * self.kernel_shape[1] + 1
 
