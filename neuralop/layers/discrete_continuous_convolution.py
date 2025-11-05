@@ -1152,6 +1152,8 @@ class EquidistantDiscreteContinuousConv3d(DiscreteContinuousConv):
             bias=bias,
         )
 
+        self.domain_length = [2, 2, 2] if domain_length is None else domain_length
+
         # to ensure compatibility with the unstructured code, only constant zero and periodic padding are supported currently
         self.padding_mode = "circular" if periodic else "zeros"
 
