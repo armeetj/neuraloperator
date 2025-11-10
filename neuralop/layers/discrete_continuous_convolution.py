@@ -188,6 +188,61 @@ def _precompute_convolution_filter_matrix(
 
     return idx, vals
 
+def _precompute_convolution_filter_matrix_3d(
+    grid_in,
+    grid_out,
+    kernel_shape,
+    quadrature_weights,
+    basis_type="piecewise_linear3d",
+    radius_cutoff=0.01,
+    periodic=False,
+    normalize=True,
+    transpose_normalization=False,
+):
+    # Validate dimensions (3D instead of 2D)
+    assert grid_in.shape[0] == 3, "grid_in must be 3D coordinates."
+    assert grid_out.shape[0] == 3, "grid_out must be 3D coordinates."
+
+    n_in = grid_in.shape[-1]
+    n_out = grid_out.shape[-1]
+
+    grid_in = grid_in.reshape(3, 1, n_in)    # [3, 1, N]
+    grid_out = grid_out.reshape(3, n_out, 1) # [3, M, 1]
+
+    # Pairwise differences
+    diffs = grid_in - grid_out
+
+    # Periodic wrap, 3D generalization
+    if periodic:
+        periodic_diffs = torch.where(diffs > 0.0, diffs - 1.0, diffs + 1.0)
+        diffs = torch.where(diffs.abs() < periodic_diffs.abs(), diffs, periodic_diffs)
+
+    # Radial distance
+    r = torch.sqrt((diffs ** 2).sum(dim=0))  # shape [M, N]
+
+    # Instantiate basis
+    basis = basis_type_classes[basis_type](kernel_shape)
+
+    # Compute sparse support representation
+    idx, vals = basis.compute_support_vals(r, r_cutoff=radius_cutoff)
+
+    # Match 2D version
+    idx = idx.permute(1, 0)
+
+    # Optional normalization
+    if normalize:
+        vals = _normalize_convolution_filter_matrix(
+            idx,
+            vals,
+            grid_in,
+            grid_out,
+            kernel_shape,
+            quadrature_weights,
+            transpose_normalization=transpose_normalization,
+        )
+
+    return idx, vals
+
 
 class DiscreteContinuousConv(nn.Module, metaclass=abc.ABCMeta):
     """
@@ -1140,7 +1195,6 @@ class EquidistantDiscreteContinuousConv3d(DiscreteContinuousConv):
         groups: Optional[int] = 1,
         bias: Optional[bool] = True,
         radius_cutoff: Optional[float] = None,
-        normalize: Optional[bool] = True,
         **kwargs,
     ):
         super().__init__(
@@ -1152,96 +1206,103 @@ class EquidistantDiscreteContinuousConv3d(DiscreteContinuousConv):
             bias=bias,
         )
 
-        self.domain_length = [2, 2, 2] if domain_length is None else domain_length
-
-        # to ensure compatibility with the unstructured code, only constant zero and periodic padding are supported currently
+        # Consistent with 2D version
         self.padding_mode = "circular" if periodic else "zeros"
 
+        # Domain lengths: default cube [-1, 1]^3 mapped from length 2
+        self.domain_length = [2, 2, 2] if domain_length is None else domain_length
+
+        # Cutoff radius: analogous to 2D logic
         if radius_cutoff is None:
-            radius_cutoff = 0.05
+            radius_cutoff = max([
+                self.domain_length[i] / float(out_shape[i])
+                for i in (0, 1, 2)
+            ])
 
         if radius_cutoff <= 0.0:
             raise ValueError("Error, radius_cutoff has to be positive.")
 
-        # compute how big the discrete kernel needs to be for the 3d convolution kernel to work
-        self.psi_local_d = math.floor(2 * radius_cutoff * in_shape[0]) + 1
-        self.psi_local_h = math.floor(2 * radius_cutoff * in_shape[1]) + 1
-        self.psi_local_w = math.floor(2 * radius_cutoff * in_shape[2]) + 1
+        # Compute discrete support window sizes (3D analogue of psi_local_h/w)
+        self.psi_local_d = (
+            math.floor(2 * radius_cutoff * in_shape[0] / self.domain_length[0]) + 1
+        )
+        self.psi_local_h = (
+            math.floor(2 * radius_cutoff * in_shape[1] / self.domain_length[1]) + 1
+        )
+        self.psi_local_w = (
+            math.floor(2 * radius_cutoff * in_shape[2] / self.domain_length[2]) + 1
+        )
 
-        # choose isotropic kernel
-        self.psi_local = max(self.psi_local_d, self.psi_local_h, self.psi_local_w)
+        # Compute scale factors just like 2D version
+        assert (in_shape[0] >= out_shape[0]) and (in_shape[0] % out_shape[0] == 0)
+        self.scale_d = in_shape[0] // out_shape[0]
 
-        if os.environ.get("DEBUG") == "1":
-            print("psi_local_d, psi_local_h, psi_local_w:", self.psi_local_d, self.psi_local_h, self.psi_local_w)
-            print("psi_local:", self.psi_local)
+        assert (in_shape[1] >= out_shape[1]) and (in_shape[1] % out_shape[1] == 0)
+        self.scale_h = in_shape[1] // out_shape[1]
 
-        # compute the scale_factor
-        for dim_in, dim_out in zip(in_shape, out_shape):
-            assert dim_in == dim_out, "Not Implemented: in_shape and out_shape must be the same, different dimensions are not supported yet"
+        assert (in_shape[2] >= out_shape[2]) and (in_shape[2] % out_shape[2] == 0)
+        self.scale_w = in_shape[2] // out_shape[2]
 
-        x = torch.linspace(-1, 1, self.psi_local)
-        y = x
-        z = x
+        # Build local grid, analogous to 2D:
+        # linspace(-radius_cutoff, radius_cutoff, psi_local_dim)
+        xd = torch.linspace(-radius_cutoff, radius_cutoff, self.psi_local_d)
+        yh = torch.linspace(-radius_cutoff, radius_cutoff, self.psi_local_h)
+        zw = torch.linspace(-radius_cutoff, radius_cutoff, self.psi_local_w)
 
-        X, Y, Z = torch.meshgrid(x, y, z, indexing="ij")
-        grid = torch.stack([Z, Y, X])  # Shape: [3, D, H, W]
-        grid_out = torch.Tensor([[0.0], [0.0], [0.0]])
+        D, H, W = torch.meshgrid(xd, yh, zw, indexing="ij")
+        grid_in = torch.stack([
+            D.reshape(-1),
+            H.reshape(-1),
+            W.reshape(-1)
+        ])  # Shape [3, N]
 
-        if os.environ.get("DEBUG") == "1":
-            print("grid shape:", grid.shape)
-
-        # compute quadrature weights on the incoming grid
-        #self.q_weight = 1 / (self.psi_local**3)
+        # Quadrature weights: perfect 3D match to 2D logic
         self.q_weight = (
-            self.domain_length[0] * self.domain_length[1] * self.domain_length[2] / in_shape[0] / in_shape[1] / in_shape[2]
+            self.domain_length[0]
+            * self.domain_length[1]
+            * self.domain_length[2]
+            / (in_shape[0] * in_shape[1] * in_shape[2])
         )
         quadrature_weights = self.q_weight * torch.ones(
             self.psi_local_d * self.psi_local_h * self.psi_local_w
         )
-        # Initialize the basis with the kernel shape
-        basis = basis_type_classes[basis_type](self.kernel_shape)
 
-        # Compute support values using the 3D API
-        idx, vals = basis.compute_support_vals(grid, r_cutoff=1.0, width=1.0)
-        #### TODO: do we need `idx = idx.permute(1, 0)`?
+        # Single output point at the origin, as in 2D
+        grid_out = torch.zeros(3, 1)
 
-        if normalize:
-            vals = _normalize_convolution_filter_matrix(
-                idx,
-                vals,
-                grid,
-                grid_out,
-                kernel_shape,
-                quadrature_weights,
-                transpose_normalization=False,
-            )
-
-
-        if os.environ.get("DEBUG") == "1":
-            print("idx.shape, vals.shape:", idx.shape, vals.shape) 
-
-        # Extract the local psi as a dense representation
-        local_filter_matrix = torch.zeros(
-            self.kernel_size, self.psi_local**3
+        # Precompute psi on this local grid using the 3D version
+        idx, vals = _precompute_convolution_filter_matrix_3d(
+            grid_in,
+            grid_out,
+            self.kernel_shape,
+            quadrature_weights,
+            basis_type=basis_type,
+            radius_cutoff=radius_cutoff,
+            periodic=False,
+            normalize=True,
         )
-        
-        if os.environ.get("DEBUG") == "1":
-            print("local_filter_matrix shape:", local_filter_matrix.shape)
 
-        # Convert sparse representation to dense
-        # idx has shape [nnz, 4] where each row is (basis_idx, z_idx, y_idx, x_idx)
-        for i in range(len(vals)):
-            basis_idx = idx[i, 0]
-            flat_idx = (
-                idx[i, 1] * self.psi_local * self.psi_local
-                + idx[i, 2] * self.psi_local
-                + idx[i, 3]
+        # Assemble dense local filter matrix, directly parallel to 2D version
+        num_points = self.psi_local_d * self.psi_local_h * self.psi_local_w
+        local_filter_matrix = torch.zeros(self.kernel_size, num_points)
+
+        # idx: [4, nnz] -> f, linear_index, ...
+        # expected order: basis index, z, y, x
+        for ie in range(len(vals)):
+            f = idx[0, ie]
+            z = idx[1, ie]
+            y = idx[2, ie]
+            x = idx[3, ie]
+            j = (
+                z * (self.psi_local_h * self.psi_local_w)
+                + y * self.psi_local_w
+                + x
             )
-            local_filter_matrix[basis_idx, flat_idx] = vals[i]
+            local_filter_matrix[f, j] = vals[ie]
 
-        # Reshape to 4D tensor
+        # Reshape into a 3D window
         local_filter_matrix = local_filter_matrix.reshape(
-            self.kernel_size, self.psi_local, self.psi_local, self.psi_local
+            self.kernel_size, self.psi_local_d, self.psi_local_h, self.psi_local_w
         )
 
         self.register_buffer(
