@@ -199,37 +199,49 @@ def _precompute_convolution_filter_matrix_3d(
     normalize=True,
     transpose_normalization=False,
 ):
-    # Validate dimensions (3D instead of 2D)
+    # Validate dimensions (3D)
     assert grid_in.shape[0] == 3, "grid_in must be 3D coordinates."
     assert grid_out.shape[0] == 3, "grid_out must be 3D coordinates."
 
     n_in = grid_in.shape[-1]
     n_out = grid_out.shape[-1]
 
+    # reshape for broadcasting: [3, 1, N_in] and [3, N_out, 1]
     grid_in = grid_in.reshape(3, 1, n_in)    # [3, 1, N]
     grid_out = grid_out.reshape(3, n_out, 1) # [3, M, 1]
 
-    # Pairwise differences
+    # Pairwise differences -> [3, M, N]
     diffs = grid_in - grid_out
 
-    # Periodic wrap, 3D generalization
+    # Periodic wrap (componentwise)
     if periodic:
         periodic_diffs = torch.where(diffs > 0.0, diffs - 1.0, diffs + 1.0)
         diffs = torch.where(diffs.abs() < periodic_diffs.abs(), diffs, periodic_diffs)
 
-    # Radial distance
-    r = torch.sqrt((diffs ** 2).sum(dim=0))  # shape [M, N]
+    # radial distance r: [M, N]
+    r = torch.sqrt((diffs ** 2).sum(dim=0) + 1e-12)
+
+    # spherical angles (same shapes [M, N])
+    # phi: azimuth angle in [-pi, pi]; add +pi if you want [0,2pi)
+    phi = torch.atan2(diffs[1], diffs[0])  # shape [M, N]
+    # polar angle theta in [0, pi]; clamp safe division
+    theta = torch.acos(torch.clamp(diffs[2] / (r + 1e-12), -1.0, 1.0))
 
     # Instantiate basis
+    assert basis_type in basis_type_classes, f"Unknown basis {basis_type}"
     basis = basis_type_classes[basis_type](kernel_shape)
 
-    # Compute sparse support representation
-    idx, vals = basis.compute_support_vals(r, r_cutoff=radius_cutoff)
+    # Compute sparse support representation. We pass r, theta, phi.
+    # Note: basis.compute_support_vals must accept (r, theta, phi, r_cutoff=...)
+    idx, vals = basis.compute_support_vals(r, theta, phi, r_cutoff=radius_cutoff)
 
-    # Match 2D version
-    idx = idx.permute(1, 0)
+    # Some basis implementations may return idx in shape [K, nnz] or [nnz, K].
+    # Normalize to [nnz, 4] where columns are [basis_idx, z_idx, y_idx, x_idx]
+    if idx.dim() == 2 and idx.shape[0] < idx.shape[1]:
+        # common case: (K, nnz) -> permute -> (nnz, K)
+        idx = idx.permute(1, 0).contiguous()
 
-    # Optional normalization
+    # If normalization requested
     if normalize:
         vals = _normalize_convolution_filter_matrix(
             idx,
