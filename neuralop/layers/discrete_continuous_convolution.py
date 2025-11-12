@@ -1305,16 +1305,30 @@ class EquidistantDiscreteContinuousConv3d(DiscreteContinuousConv):
         num_points = self.psi_local_d * self.psi_local_h * self.psi_local_w
         local_filter_matrix = torch.zeros(self.kernel_size, num_points)
 
-        # idx: [4, nnz] -> basis index, z, y, x coordinates
-        # The indices are already z, y, x coordinates but may be out of bounds
-        # for the local grid, so we need to filter them
+        # idx: [4, nnz] -> The format from compute_support_vals is [basis_idx, m, n, ?]
+        # where m is the output index (0 in our case, since we have 1 output point)
+        # and n is the linear input index into the flattened input grid
+        # We need to convert the linear index n to z, y, x coordinates
         for ie in range(len(vals)):
             f = idx[0, ie].item() if torch.is_tensor(idx[0, ie]) else int(idx[0, ie])
-            z = idx[1, ie].item() if torch.is_tensor(idx[1, ie]) else int(idx[1, ie])
-            y = idx[2, ie].item() if torch.is_tensor(idx[2, ie]) else int(idx[2, ie])
-            x = idx[3, ie].item() if torch.is_tensor(idx[3, ie]) else int(idx[3, ie])
             
-            # Bounds check for z, y, x coordinates
+            # idx[2, ie] is likely the linear input index n into the [M, N] grid
+            # Since M=1 (single output point), n is the input point index (0 to N-1)
+            linear_input_idx = idx[2, ie].item() if torch.is_tensor(idx[2, ie]) else int(idx[2, ie])
+            
+            # Bounds check for linear input index
+            if linear_input_idx < 0 or linear_input_idx >= num_points:
+                continue  # Skip out-of-bounds indices
+            
+            # Convert linear index to z, y, x coordinates
+            # grid_in is flattened as: D.reshape(-1), H.reshape(-1), W.reshape(-1)
+            # The meshgrid uses indexing="ij", so the order is (d, h, w) = (z, y, x)
+            z = linear_input_idx // (self.psi_local_h * self.psi_local_w)
+            remainder = linear_input_idx % (self.psi_local_h * self.psi_local_w)
+            y = remainder // self.psi_local_w
+            x = remainder % self.psi_local_w
+            
+            # Bounds check for z, y, x (should always pass if linear_input_idx is valid)
             if (z < 0 or z >= self.psi_local_d or 
                 y < 0 or y >= self.psi_local_h or 
                 x < 0 or x >= self.psi_local_w):
@@ -1324,14 +1338,14 @@ class EquidistantDiscreteContinuousConv3d(DiscreteContinuousConv):
             if f < 0 or f >= self.kernel_size:
                 continue  # Skip out-of-bounds basis index
             
-            # Compute linear index j from z, y, x
+            # Compute linear index j from z, y, x (should equal linear_input_idx)
             j = (
                 z * (self.psi_local_h * self.psi_local_w)
                 + y * self.psi_local_w
                 + x
             )
             
-            # Final bounds check for j (should always pass if z, y, x are valid)
+            # Final bounds check for j
             if j < 0 or j >= num_points:
                 continue  # Skip out-of-bounds indices
                 
