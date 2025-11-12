@@ -1305,18 +1305,36 @@ class EquidistantDiscreteContinuousConv3d(DiscreteContinuousConv):
         num_points = self.psi_local_d * self.psi_local_h * self.psi_local_w
         local_filter_matrix = torch.zeros(self.kernel_size, num_points)
 
-        # idx: [4, nnz] -> f, linear_index, ...
-        # expected order: basis index, z, y, x
+        # idx: [4, nnz] -> basis index, z, y, x coordinates
+        # The indices are already z, y, x coordinates but may be out of bounds
+        # for the local grid, so we need to filter them
         for ie in range(len(vals)):
-            f = idx[0, ie]
-            z = idx[1, ie]
-            y = idx[2, ie]
-            x = idx[3, ie]
+            f = idx[0, ie].item() if torch.is_tensor(idx[0, ie]) else int(idx[0, ie])
+            z = idx[1, ie].item() if torch.is_tensor(idx[1, ie]) else int(idx[1, ie])
+            y = idx[2, ie].item() if torch.is_tensor(idx[2, ie]) else int(idx[2, ie])
+            x = idx[3, ie].item() if torch.is_tensor(idx[3, ie]) else int(idx[3, ie])
+            
+            # Bounds check for z, y, x coordinates
+            if (z < 0 or z >= self.psi_local_d or 
+                y < 0 or y >= self.psi_local_h or 
+                x < 0 or x >= self.psi_local_w):
+                continue  # Skip out-of-bounds indices
+            
+            # Bounds check for f (basis index)
+            if f < 0 or f >= self.kernel_size:
+                continue  # Skip out-of-bounds basis index
+            
+            # Compute linear index j from z, y, x
             j = (
                 z * (self.psi_local_h * self.psi_local_w)
                 + y * self.psi_local_w
                 + x
             )
+            
+            # Final bounds check for j (should always pass if z, y, x are valid)
+            if j < 0 or j >= num_points:
+                continue  # Skip out-of-bounds indices
+                
             local_filter_matrix[f, j] = vals[ie]
 
         # Reshape into a 3D window
