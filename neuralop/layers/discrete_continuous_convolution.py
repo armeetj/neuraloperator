@@ -54,6 +54,13 @@ def _normalize_convolution_filter_matrix(
         kernel_size = math.ceil(kernel_shape[0] / 2)
     elif len(kernel_shape) == 2:
         kernel_size = (kernel_shape[0] // 2) * kernel_shape[1] + kernel_shape[0] % 2
+    elif len(kernel_shape) == 3:
+        kernel_size = (
+            (kernel_shape[0] // 2) * kernel_shape[1] * kernel_shape[2]
+            + kernel_shape[0] % 2
+        )
+    else:
+        raise ValueError(f"Unsupported kernel_shape dimensionality: {kernel_shape}")
 
     # # reshape the indices implicitly to be ikernel, n_in, n_out
     # idx = torch.stack([psi_idx[0], psi_idx[1], psi_idx[2] // nlon_in, psi_idx[2] % nlon_in], dim=0)
