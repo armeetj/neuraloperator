@@ -243,10 +243,39 @@ def _precompute_convolution_filter_matrix_3d(
     idx, vals = basis.compute_support_vals(r, theta, phi, r_cutoff=radius_cutoff)
 
     # Some basis implementations may return idx in shape [K, nnz] or [nnz, K].
-    # Normalize to [nnz, 4] where columns are [basis_idx, z_idx, y_idx, x_idx]
-    if idx.dim() == 2 and idx.shape[0] < idx.shape[1]:
-        # common case: (K, nnz) -> permute -> (nnz, K)
+    # We need to ensure idx has shape [4, nnz] where rows are:
+    # [basis_idx, output_idx, input_idx, unused]
+    # First, normalize to [K, nnz] format (transpose if needed)
+    if idx.dim() == 2 and idx.shape[0] > idx.shape[1]:
+        # idx is [nnz, K] with nnz > K, transpose to [K, nnz]
         idx = idx.permute(1, 0).contiguous()
+    # If idx.shape[0] < idx.shape[1], it's already [K, nnz] format, no transpose needed
+    
+    # Now idx should be [K, nnz]. Ensure it has 4 rows
+    K, nnz = idx.shape
+    if K == 2:
+        # Basis returned [basis_idx, input_idx] (2 rows)
+        # Since we have a single output point (grid_out has shape [3, 1]), output_idx should be 0
+        # The second row is the input index into the input grid
+        basis_idx = idx[0, :]  # [nnz]
+        input_idx = idx[1, :]  # [nnz] - linear index into input grid
+        
+        # Construct proper idx format: [4, nnz]
+        # Format: [basis_idx, output_idx, input_idx, unused]
+        # Since M=1 (single output point), output_idx is always 0
+        idx = torch.stack([
+            basis_idx,
+            torch.zeros(nnz, dtype=idx.dtype, device=idx.device),  # output_idx = 0
+            input_idx,
+            torch.zeros(nnz, dtype=idx.dtype, device=idx.device)   # unused = 0
+        ], dim=0)
+    elif K < 4:
+        # Pad with zeros if needed
+        padding = torch.zeros(4 - K, nnz, dtype=idx.dtype, device=idx.device)
+        idx = torch.cat([idx, padding], dim=0)
+    elif K > 4:
+        # Truncate to 4 rows
+        idx = idx[:4, :]
 
     # If normalization requested
     if normalize:
