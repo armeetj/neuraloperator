@@ -1427,9 +1427,9 @@ class EquidistantDiscreteContinuousConv3d(DiscreteContinuousConv):
         kernel = self.compile_kernel()
 
         # padding is rounded down to give the right result when even kernels are applied
-        d_pad = (self.psi_local + 1) // 2 - 1
-        h_pad = (self.psi_local + 1) // 2 - 1
-        w_pad = (self.psi_local + 1) // 2 - 1
+        d_pad = (self.psi_local_d + 1) // 2 - 1
+        h_pad = (self.psi_local_h + 1) // 2 - 1
+        w_pad = (self.psi_local_w + 1) // 2 - 1
 
         out = nn.functional.conv3d(
             self.q_weight * x,
